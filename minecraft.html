@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minecraft Voxel Builder</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; font-family: 'Inter', sans-serif; }
+        canvas { display: block; }
+        #info-panel {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            z-index: 10;
+            user-select: none;
+            max-width: 90%;
+        }
+        #controls-panel {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            z-index: 10;
+        }
+        .block-selector {
+            width: 70px;
+            height: 70px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 3px solid transparent;
+            border-radius: 15px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5);
+            font-size: 0.8rem;
+            color: white;
+        }
+        .block-selector.selected {
+            border-color: gold;
+            background: rgba(255, 255, 255, 0.3);
+            transform: scale(1.1);
+        }
+        .block-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 5px;
+            margin-bottom: 3px;
+            border: 1px solid rgba(0, 0, 0, 0.3);
+        }
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 20px;
+            height: 20px;
+            margin: -10px 0 0 -10px;
+            border: 1px solid white;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 100;
+            box-shadow: 0 0 5px rgba(255, 255, 255, 0.8);
+        }
+        /* Color classes for icons */
+        .grass-color { background: linear-gradient(to bottom, #7CFC00 50%, #654321 50%); }
+        .stone-color { background: #808080; }
+        .wood-color { background: #8B4513; }
+        .leaf-color { background: #228B22; } /* New leaf color */
+        .info-key {
+            background-color: #333;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: bold;
+            margin: 0 2px;
+            border: 1px solid #555;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="info-panel">
+        <p>
+            Use <span class="info-key">WASD</span> or <span class="info-key">Arrow Keys</span> to Move.
+            <br>
+            <span class="info-key">Left Click</span> to Destroy. <span class="info-key">Right Click</span> to Place.
+        </p>
+        <div id="selected-block-display">
+            Selected: <span id="current-block-name" style="font-weight: bold; color: gold;">GRASS</span>
+        </div>
+    </div>
+
+    <div id="controls-panel">
+        <!-- Block selectors will be injected here --></div>
+
+    <div id="crosshair"></div>
+
+    <script>
+        // --- Global Variables ---
+        let scene, camera, renderer, world;
+        let raycaster;
+        let pointer = new THREE.Vector2();
+        let currentBlockType = 'GRASS';
+        let blockMap = new Map(); // Store block meshes by their position key "x,y,z"
+
+        // --- Block Definitions ---
+        const BLOCK_SIZE = 1;
+        const BLOCK_TYPES = {
+            'GRASS': {
+                name: 'Grass',
+                key: '1',
+                material: [
+                    new THREE.MeshLambertMaterial({ color: 0x654321 }), // Bottom (Dirt)
+                    new THREE.MeshLambertMaterial({ color: 0x7CFC00 }), // Top (Grass)
+                    new THREE.MeshLambertMaterial({ color: 0x6B8E23 }), // Sides (Mixed/Shaded)
+                    new THREE.MeshLambertMaterial({ color: 0x6B8E23 }), // Sides
+                    new THREE.MeshLambertMaterial({ color: 0x6B8E23 }), // Sides
+                    new THREE.MeshLambertMaterial({ color: 0x6B8E23 }), // Sides
+                ],
+                // Correctly ordered materials for a BoxGeometry (right, left, top, bottom, front, back)
+                getMaterials: () => [
+                    BLOCK_TYPES.GRASS.material[2], BLOCK_TYPES.GRASS.material[2], // Right, Left
+                    BLOCK_TYPES.GRASS.material[1], // Top
+                    BLOCK_TYPES.GRASS.material[0], // Bottom
+                    BLOCK_TYPES.GRASS.material[2], BLOCK_TYPES.GRASS.material[2]  // Front, Back
+                ],
+                colorClass: 'grass-color'
+            },
+            'STONE': {
+                name: 'Stone',
+                key: '2',
+                color: 0x808080,
+                getMaterials: () => new THREE.MeshLambertMaterial({ color: 0x808080 }),
+                colorClass: 'stone-color'
+            },
+            'WOOD': {
+                name: 'Wood',
+                key: '3',
+                color: 0x8B4513,
+                getMaterials: () => new THREE.MeshLambertMaterial({ color: 0x8B4513 }),
+                colorClass: 'wood-color'
+            },
+            'LEAVES': { // New block type for leaves
+                name: 'Leaves',
+                key: '4', // New key for leaves
+                color: 0x228B22,
+                getMaterials: () => new THREE.MeshLambertMaterial({ color: 0x228B22 }),
+                colorClass: 'leaf-color'
+            }
+        };
+
+        // --- Movement & Controls ---
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        // CHANGED: Increased moveSpeed significantly and adjusted calculations below
+        const moveSpeed = 7.0; // Units per second
+        const keys = {
+            w: false, a: false, s: false, d: false,
+            ArrowUp: false, ArrowLeft: false, ArrowDown: false, ArrowRight: false
+        };
+
+        // --- Initialization ---
+        window.onload = function() {
+            init();
+            setupControlsUI();
+            createInitialWorld();
+            animate();
+        };
+
+        function init() {
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // Sky blue
+            scene.fog = new THREE.Fog(0x87CEEB, 1, 100);
+
+            // Camera setup (First-person perspective)
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 1.7, 5); // Default player height 1.7
+            // Make it more "blocky" by slightly reducing the FOV (less distortion)
+            camera.fov = 70; // Original was 75, lower gives less fisheye, more blocky feel
+            camera.updateProjectionMatrix();
+
+
+            // Renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            // World group (for easy raycasting and management)
+            world = new THREE.Group();
+            scene.add(world);
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0x606060);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.6);
+            directionalLight.position.set(10, 30, 10);
+            scene.add(directionalLight);
+
+            // Raycaster for block interaction
+            raycaster = new THREE.Raycaster();
+
+            // Event Listeners
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('mousedown', onPointerDown, false);
+            document.addEventListener('contextmenu', (e) => e.preventDefault(), false); // Prevent context menu for right-click
+
+            // Pointer lock for continuous camera control (simulating FPS controls)
+            document.body.requestPointerLock = document.body.requestPointerLock || document.body.mozRequestPointerLock;
+            document.body.addEventListener('click', () => { document.body.requestPointerLock(); });
+
+            document.addEventListener('mousemove', onMouseMove, false);
+            document.addEventListener('keydown', onKeyDown, false);
+            document.addEventListener('keyup', onKeyUp, false);
+        }
+
+        function setupControlsUI() {
+            const controlsPanel = document.getElementById('controls-panel');
+            // Dynamically assign keys if needed, or hardcode here.
+            // For now, assume BLOCK_TYPES has 'key' property set.
+            Object.values(BLOCK_TYPES).forEach(block => {
+                const selector = document.createElement('div');
+                selector.className = `block-selector`;
+                selector.id = `selector-${block.name}`;
+                selector.setAttribute('data-block-type', block.name);
+                selector.setAttribute('title', `${block.name} (${block.key})`);
+                selector.innerHTML = `
+                    <div class="block-icon ${block.colorClass}"></div>
+                    ${block.key}
+                `;
+                controlsPanel.appendChild(selector);
+                selector.addEventListener('click', () => {
+                    setCurrentBlockType(block.name);
+                });
+            });
+            // Set initial selected state
+            setCurrentBlockType(currentBlockType);
+        }
+
+        function setCurrentBlockType(type) {
+            currentBlockType = type;
+            document.getElementById('current-block-name').textContent = type;
+
+            document.querySelectorAll('.block-selector').forEach(el => {
+                el.classList.remove('selected');
+                if (el.getAttribute('data-block-type') === type) {
+                    el.classList.add('selected');
+                }
+            });
+        }
+
+        function createInitialWorld() {
+            const WORLD_WIDTH = 10;
+            const WORLD_DEPTH = 10;
+
+            for (let x = -WORLD_WIDTH / 2; x <= WORLD_WIDTH / 2; x++) {
+                for (let z = -WORLD_DEPTH / 2; z <= WORLD_DEPTH / 2; z++) {
+                    addVoxel(x, 0, z, 'GRASS'); // A flat layer of grass
+                }
+            }
+
+            // --- Add Trees ---
+            addTree(-4, 0, -4);
+            addTree(5, 0, 3);
+            addTree(0, 0, -6);
+        }
+
+        /**
+         * Adds a simple tree structure.
+         * @param {number} startX - The X grid coordinate for the tree base.
+         * @param {number} startY - The Y grid coordinate for the tree base (should be on top of ground).
+         * @param {number} startZ - The Z grid coordinate for the tree base.
+         */
+        function addTree(startX, startY, startZ) {
+            const trunkHeight = 3 + Math.floor(Math.random() * 2); // 3 or 4 blocks high
+            const leafSpread = 2; // Radius of leaves around the top
+
+            // Place Trunk
+            for (let y = 1; y <= trunkHeight; y++) {
+                addVoxel(startX, startY + y, startZ, 'WOOD');
+            }
+
+            // Place Leaves (a messy blob for now)
+            const topOfTrunkY = startY + trunkHeight;
+            for (let x = startX - leafSpread; x <= startX + leafSpread; x++) {
+                for (let z = startZ - leafSpread; z <= startZ + leafSpread; z++) {
+                    for (let y = topOfTrunkY; y <= topOfTrunkY + 1; y++) { // 2 layers of leaves
+                        // Skip corners for a slightly rounder shape, and some random gaps
+                        if (Math.abs(x - startX) + Math.abs(z - startZ) + Math.abs(y - topOfTrunkY) < 3.5 && Math.random() > 0.3) {
+                             addVoxel(x, y, z, 'LEAVES');
+                        }
+                    }
+                }
+            }
+            // Add a few more leaves on top for a dome effect
+            addVoxel(startX, topOfTrunkY + 2, startZ, 'LEAVES');
+            if (Math.random() > 0.5) addVoxel(startX + 1, topOfTrunkY + 2, startZ, 'LEAVES');
+            if (Math.random() > 0.5) addVoxel(startX - 1, topOfTrunkY + 2, startZ, 'LEAVES');
+            if (Math.random() > 0.5) addVoxel(startX, topOfTrunkY + 2, startZ + 1, 'LEAVES');
+            if (Math.random() > 0.5) addVoxel(startX, topOfTrunkY + 2, startZ - 1, 'LEAVES');
+        }
+
+
+        function createVoxelGeometry() {
+            return new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+        }
+
+        /**
+         * Adds a voxel to the world. (x, y, z) are grid coordinates (bottom-left-front corner).
+         */
+        function addVoxel(x, y, z, type) {
+            const key = `${x},${y},${z}`;
+            if (blockMap.has(key)) return; // Don't place a block if one already exists
+
+            const blockDef = BLOCK_TYPES[type];
+            let material;
+
+            // Handle special material case for GRASS block (different sides)
+            if (type === 'GRASS') {
+                material = blockDef.getMaterials();
+            } else {
+                material = blockDef.getMaterials();
+            }
+
+            const mesh = new THREE.Mesh(createVoxelGeometry(), material);
+            // Mesh position is centered, so we offset Y by half a block size
+            mesh.position.set(x, y + BLOCK_SIZE / 2, z);
+            mesh.userData.positionKey = key;
+            mesh.userData.type = type;
+
+            world.add(mesh);
+            blockMap.set(key, mesh);
+        }
+
+        function removeVoxel(mesh) {
+            world.remove(mesh);
+            blockMap.delete(mesh.userData.positionKey);
+            mesh.geometry.dispose();
+            if (Array.isArray(mesh.material)) {
+                 mesh.material.forEach(m => m.dispose());
+            } else {
+                mesh.material.dispose();
+            }
+        }
+
+        // --- Event Handlers ---
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onPointerDown(event) {
+            event.preventDefault(); // Important for custom interaction
+            
+            // Calculate normalized device coordinates
+            // Using the center of the screen for raycasting (crosshair)
+            pointer.x = 0; 
+            pointer.y = 0;
+
+            raycaster.setFromCamera(pointer, camera);
+            const intersects = raycaster.intersectObjects(world.children, false);
+
+            if (intersects.length > 0) {
+                const intersect = intersects[0];
+                const voxel = intersect.object;
+                const position = voxel.position;
+
+                // Left Click (Destroy)
+                if (event.button === 0) {
+                    removeVoxel(voxel);
+                }
+                // Right Click (Place)
+                else if (event.button === 2) {
+                    // 1. Get the grid coordinates (bottom-left-front corner) of the intersected block
+                    // Since center is (x, y + 0.5, z), grid Y is center Y - 0.5
+                    const gridX = position.x;
+                    const gridY = position.y - BLOCK_SIZE / 2;
+                    const gridZ = position.z;
+
+                    // 2. The face normal tells us the direction to step in the grid
+                    const normal = intersect.face.normal.clone();
+                    
+                    // 3. Calculate the new block's grid position
+                    const placementPos = new THREE.Vector3(
+                        gridX + normal.x * BLOCK_SIZE,
+                        gridY + normal.y * BLOCK_SIZE,
+                        gridZ + normal.z * BLOCK_SIZE
+                    );
+
+                    // 4. Check if the new block collides with the camera (player position)
+                    const playerPos = camera.position;
+                    const tooClose = (
+                        Math.abs(placementPos.x - playerPos.x) < BLOCK_SIZE * 0.5 &&
+                        Math.abs(placementPos.y - playerPos.y) < BLOCK_SIZE * 2.0 &&
+                        Math.abs(placementPos.z - playerPos.z) < BLOCK_SIZE * 0.5
+                    );
+
+                    if (!tooClose) {
+                         // addVoxel takes grid coordinates (bottom corner)
+                         addVoxel(placementPos.x, placementPos.y, placementPos.z, currentBlockType);
+                    }
+                }
+            }
+        }
+
+        // Camera rotation on mouse move (when pointer is locked)
+        function onMouseMove(event) {
+            if (document.pointerLockElement === document.body) {
+                const movementX = event.movementX || event.mozMovementX || 0;
+                const movementY = event.movementY || event.mozMovementY || 0;
+
+                // Yaw (Y-axis rotation)
+                camera.rotation.y -= movementX * 0.002;
+
+                // Pitch (X-axis rotation) - clamping to prevent flipping
+                let pitch = camera.rotation.x;
+                pitch -= movementY * 0.002;
+                pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+                camera.rotation.x = pitch;
+            }
+        }
+
+        function onKeyDown(event) {
+            keys[event.key] = true;
+            keys[event.key.toLowerCase()] = true; // Handle WASD
+
+            // Block selection via keys
+            Object.values(BLOCK_TYPES).forEach(block => {
+                if (event.key === block.key) {
+                    setCurrentBlockType(block.name);
+                }
+            });
+        }
+
+        function onKeyUp(event) {
+            keys[event.key] = false;
+            keys[event.key.toLowerCase()] = false; // Handle WASD
+        }
+
+        // --- Animation Loop ---
+
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = clock.getDelta();
+
+            // Reset velocity
+            velocity.x = 0;
+            velocity.z = 0;
+
+            // Movement logic
+            direction.z = Number(keys.w || keys.ArrowUp) - Number(keys.s || keys.ArrowDown);
+            direction.x = Number(keys.a || keys.ArrowLeft) - Number(keys.d || keys.ArrowRight);
+
+            direction.normalize(); // Ensure constant speed when moving diagonally
+
+            if (keys.w || keys.ArrowUp || keys.s || keys.ArrowDown) {
+                // Move forward/backward relative to camera direction
+                // CHANGED: Removed the * 100 factor for cleaner, delta-based speed
+                velocity.z = direction.z * moveSpeed * delta;
+            }
+            if (keys.a || keys.ArrowLeft || keys.d || keys.ArrowRight) {
+                // Move strafing left/right relative to camera direction
+                // CHANGED: Removed the * 100 factor for cleaner, delta-based speed
+                velocity.x = direction.x * moveSpeed * delta;
+            }
+
+            // Apply movement (rotated by camera's current yaw)
+            const rotationY = camera.rotation.y;
+
+            // FIX: Negate velocity.z (forward/backward component) to correct inverted movement.
+            const forwardVelocity = -velocity.z; 
+
+            if (velocity.z !== 0 || velocity.x !== 0) {
+                camera.position.x += forwardVelocity * Math.sin(rotationY) + velocity.x * Math.cos(rotationY);
+                camera.position.z += forwardVelocity * Math.cos(rotationY) - velocity.x * Math.sin(rotationY);
+            }
+
+            // Simple "gravity" (keep player on the ground)
+            if (camera.position.y !== 1.7) {
+                camera.position.y = 1.7; // Stick to the ground plane
+            }
+
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
